@@ -112,7 +112,7 @@ pytest tests/ -v
 | XSW1 | Signed assertion buried inside unsigned clone |
 | XSW2 | Unsigned clone precedes signed assertion as sibling |
 | XSW3 | Signed element wrapped in new unsigned parent |
-| XSW4 | Unsigned sibling shadows signed element |
+| XSW4 | Signed element buried in a wrapper beside an unsigned assertion |
 | XSW5 | Extensions block used to hide signed assertion |
 | XSW6 | Signature element relocated into cloned assertion |
 | XSW7 | Malicious assertion nested inside ds:KeyInfo |

@@ -195,6 +195,72 @@ def _build_duplicate_id_response() -> bytes:
     return xml.encode("utf-8")
 
 
+def _signed(assertion_id: str = "legit001", extra: str = "") -> str:
+    return f'''<saml:Assertion ID="{assertion_id}">{extra}
+      <saml:Subject><saml:NameID>normal@target.com</saml:NameID></saml:Subject>
+    </saml:Assertion>'''
+
+
+def _evil(extra: str = "") -> str:
+    return f'''<saml:Assertion ID="evil001">{extra}
+      <saml:Subject><saml:NameID>superadmin@target.com</saml:NameID></saml:Subject>
+    </saml:Assertion>'''
+
+
+def _response(body: str) -> bytes:
+    """A Response whose signature references the assertion 'legit001'."""
+    return f'''<samlp:Response xmlns:samlp="{SAMLP_NS}" xmlns:saml="{SAML_NS}" xmlns:ds="{DS_NS}" ID="_resp1">
+  <ds:Signature><ds:SignedInfo><ds:Reference URI="#legit001"/></ds:SignedInfo></ds:Signature>
+  {body}
+</samlp:Response>'''.encode("utf-8")
+
+
+XSW_VARIANT_PAYLOADS = {
+    XSWVariant.XSW3: _response(f"<Wrapper>{_signed()}</Wrapper>"),
+    XSWVariant.XSW4: _response(f"{_evil()}<Wrapper>{_signed()}</Wrapper>"),
+    XSWVariant.XSW6: _response(
+        _evil("<ds:Signature><ds:SignatureValue>x</ds:SignatureValue></ds:Signature>") + _signed()
+    ),
+    XSWVariant.XSW8: _response(
+        f"{_evil()}<ds:Signature><ds:Object>{_signed()}</ds:Object></ds:Signature>"
+    ),
+}
+
+
+# ── Tests: XSW3, XSW4, XSW6, XSW8 ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("variant", list(XSW_VARIANT_PAYLOADS))
+def test_variant_detected(variant):
+    analysis = xsw_detector.analyze(XSW_VARIANT_PAYLOADS[variant])
+    assert variant in analysis.variant_guesses
+    assert analysis.is_xsw_suspected
+
+
+def test_xsw3_and_xsw4_are_distinct():
+    xsw3 = xsw_detector.analyze(XSW_VARIANT_PAYLOADS[XSWVariant.XSW3]).variant_guesses
+    xsw4 = xsw_detector.analyze(XSW_VARIANT_PAYLOADS[XSWVariant.XSW4]).variant_guesses
+    assert XSWVariant.XSW4 not in xsw3
+    assert XSWVariant.XSW3 not in xsw4
+
+
+@pytest.mark.parametrize("builder", [
+    _build_clean_response, _build_xsw1_response, _build_xsw2_response,
+    _build_xsw5_response, _build_xsw7_response, _build_duplicate_id_response,
+])
+def test_wrapper_checks_do_not_fire_on_other_payloads(builder):
+    guesses = xsw_detector.analyze(builder()).variant_guesses
+    assert XSWVariant.XSW3 not in guesses
+    assert XSWVariant.XSW4 not in guesses
+
+
+@pytest.mark.parametrize("body", [
+    _signed(),
+    f"<saml:Advice>{_signed()}</saml:Advice>",
+])
+def test_expected_parents_are_not_flagged(body):
+    assert not xsw_detector.analyze(_response(body)).variant_guesses
+
+
 # ── Tests: Clean Responses ────────────────────────────────────────────────────
 
 class TestCleanResponse:

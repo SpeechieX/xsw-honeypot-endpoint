@@ -11,12 +11,13 @@
 #   - Detect Signature relocation (XSW6)
 #   - Detect KeyInfo wrapping (XSW7)
 #   - Detect Object-element wrapping (XSW8)
-#   - Detect shadowing siblings (XSW2, XSW4)
+#   - Detect shadowing siblings (XSW2)
+#   - Detect unsigned wrapper parents (XSW3) and buried signed elements (XSW4)
 #   - Detect structural depth anomalies
 
 from lxml import etree
 from typing import Optional
-from .models import (
+from ..models import (
     XSWAnalysis, XSWIndicator, XSWVariant, Severity
 )
 
@@ -135,6 +136,74 @@ def _check_xsw1_xsw2(
                             severity_contribution=40,
                         ))
 
+    return list(set(variants))
+
+
+def _check_xsw3_xsw4(
+    assertions: list,
+    signed_ids: set[str],
+    indicators: list[XSWIndicator],
+) -> list[XSWVariant]:
+    # XSW3: A signed Assertion is wrapped in a new, unsigned parent element.
+    # XSW4: Same burial, with an unsigned Assertion beside the wrapper to
+    #       shadow the signed one.
+    # Burial inside another Assertion (XSW1) and direct placement in
+    # Extensions, KeyInfo or Object (XSW5, XSW7, XSW8) are handled elsewhere.
+    variants = []
+    assertion_tag = f"{{{NS['saml']}}}Assertion"
+    expected_parents = {
+        f"{{{NS['samlp']}}}Response",
+        f"{{{NS['saml']}}}Advice",
+        f"{{{NS['samlp']}}}Extensions",
+        f"{{{NS['ds']}}}KeyInfo",
+        f"{{{NS['ds']}}}Object",
+    }
+    handled_wrappers = {
+        f"{{{NS['samlp']}}}Extensions",
+        f"{{{NS['ds']}}}Signature",
+    }
+    unsigned = [el for el, aid in assertions if aid not in signed_ids]
+
+    for el, aid in assertions:
+        parent = el.getparent()
+        if aid not in signed_ids or parent is None:
+            continue
+        ancestors = list(el.iterancestors())
+        if any(a.tag == assertion_tag for a in ancestors):
+            continue
+
+        # XSW4: some ancestor wrapper sits next to an unsigned Assertion.
+        shadowed = any(
+            wrapper.tag not in handled_wrappers
+            and any(sib in unsigned for sib in wrapper.getparent().iterchildren(assertion_tag))
+            for wrapper in ancestors
+            if wrapper.getparent() is not None
+        )
+        if shadowed:
+            variants.append(XSWVariant.XSW4)
+            indicators.append(XSWIndicator(
+                indicator_type="XSW4_SHADOWED_BURIAL",
+                description=(
+                    f"Signed Assertion ID='{aid}' is buried in a wrapper that has "
+                    "an unsigned Assertion as its sibling — XSW4 pattern."
+                ),
+                xpath=f"//saml:Assertion[@ID='{aid}']",
+                severity_contribution=40,
+            ))
+            continue
+
+        parent_id = parent.get("ID") or parent.get("Id") or parent.get("id")
+        if parent.tag not in expected_parents and parent_id not in signed_ids:
+            variants.append(XSWVariant.XSW3)
+            indicators.append(XSWIndicator(
+                indicator_type="XSW3_UNSIGNED_WRAPPER",
+                description=(
+                    f"Signed Assertion ID='{aid}' is wrapped in an unexpected "
+                    "unsigned parent element — XSW3 pattern."
+                ),
+                xpath=f"//saml:Assertion[@ID='{aid}']/..",
+                severity_contribution=40,
+            ))
     return list(set(variants))
 
 
@@ -359,6 +428,7 @@ def analyze(xml_bytes: bytes) -> XSWAnalysis:
 
     # ── Variant-Specific Checks ───────────────────────────────────────────────
     variant_guesses += _check_xsw1_xsw2(root, assertions, signed_ids, indicators)
+    variant_guesses += _check_xsw3_xsw4(assertions, signed_ids, indicators)
     variant_guesses += _check_xsw5_extensions(root, indicators)
     analysis.has_extensions_wrapping = XSWVariant.XSW5 in variant_guesses
     variant_guesses += _check_xsw6_signature_relocation(root, assertions, signed_ids, indicators)
